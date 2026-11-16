@@ -7,7 +7,7 @@ import {
 } from 'discord.js';
 
 const need = (k) => { const v = process.env[k]; if (!v) { console.error(`Variable manquante : ${k}`); process.exit(1); } return v; };
-const TOKEN = need('DISCORD_TOKEN'), GUILD_ID = need('GUILD_ID'), CATEGORY_ID = need('CATEGORY_ID');
+const TOKEN = need('DISCORD_TOKEN').trim().replace(/^["']|["']$/g, '').replace(/^Bot\s+/i, ''), GUILD_ID = need('GUILD_ID'), CATEGORY_ID = need('CATEGORY_ID');
 const EMPLOYEE_ROLE = need('EMPLOYEE_ROLE_ID'), STAFF_ROLE = need('STAFF_ROLE_ID'), API_KEY = need('BOT_API_KEY');
 const SITE_URL = need('SITE_URL').replace(/\/+$/, '');
 const LOG_CHANNEL = process.env.LOG_CHANNEL_ID || '';
@@ -264,4 +264,9 @@ http.createServer(async (req, res) => {
   } catch (err) { console.error(err); await alertStaff(`⚠️ Fiche non postée : ${err.message}`); out(500, { ok: false }); }
 }).listen(PORT, () => console.log('Serveur HTTP du bot sur le port ' + PORT));
 
-client.login(TOKEN);
+console.log(`Token reçu : ${TOKEN.length} caractères, ${TOKEN.split('.').length} parties (un vrai token : environ 70 caractères, 3 parties)`);
+client.login(TOKEN).catch((err) => {
+  console.error(`Connexion refusée par Discord : ${err.message}`);
+  console.error("→ Portail Discord › onglet Bot (pas OAuth2) › Reset Token › Copy, puis recolle-le dans DISCORD_TOKEN sur Railway.");
+  process.exit(1);
+});
