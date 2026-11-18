@@ -11,6 +11,10 @@ const TOKEN = need('DISCORD_TOKEN').trim().replace(/^["']|["']$/g, '').replace(/
 const EMPLOYEE_ROLE = need('EMPLOYEE_ROLE_ID'), STAFF_ROLE = need('STAFF_ROLE_ID'), API_KEY = need('BOT_API_KEY');
 const SITE_URL = need('SITE_URL').replace(/\/+$/, '');
 const LOG_CHANNEL = process.env.LOG_CHANNEL_ID || '';
+const SANCTIONS_CHANNEL = process.env.SANCTIONS_CHANNEL_ID || '1554230568600997938';
+const AVIS_CHANNEL = process.env.AVIS_CHANNEL_ID || '';       // vide = le salon où la commande est tapée
+const RC_CHANNEL = process.env.RC_CHANNEL_ID || '';           // vide = le salon où la commande est tapée
+const WELCOME_CHANNEL = process.env.WELCOME_CHANNEL_ID || ''; // vide = salon dont le nom contient « bienvenue »
 const PORT = Number(process.env.PORT || 3000);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -216,12 +220,112 @@ const commands = [
       .addUserOption((o) => o.setName('membre').setDescription('Le membre').setRequired(true)))
     .addSubcommand((s) => s.setName('sync').setDescription('Crée les casiers manquants pour tous les employés'))
     .addSubcommand((s) => s.setName('fiches').setDescription('Envoie dans les casiers toutes les fiches déjà créées sur le site')),
+  new SlashCommandBuilder().setName('sanction').setDescription('Sanctionne un employé (avertissement, blâme ou convocation)')
+    .addStringOption((o) => o.setName('type').setDescription('Type de sanction').setRequired(true)
+      .addChoices({ name: 'Avertissement', value: 'Avertissement' }, { name: 'Blâme', value: 'Blâme' }, { name: 'Convocation', value: 'Convocation' }))
+    .addUserOption((o) => o.setName('membre').setDescription("L'employé sanctionné").setRequired(true))
+    .addStringOption((o) => o.setName('motif').setDescription('Motif de la sanction').setRequired(true).setMaxLength(500))
+    .addStringOption((o) => o.setName('date').setDescription('Convocation : date et heure (ex. demain 21h)').setMaxLength(80))
+    .addStringOption((o) => o.setName('lieu').setDescription('Convocation : lieu').setMaxLength(80)),
+  new SlashCommandBuilder().setName('avis').setDescription('Donne ton avis')
+    .addIntegerOption((o) => o.setName('note').setDescription('Note de 1 à 5').setRequired(true).setMinValue(1).setMaxValue(5))
+    .addStringOption((o) => o.setName('message').setDescription('Ton avis').setRequired(true).setMaxLength(1000))
+    .addUserOption((o) => o.setName('employe').setDescription("L'employé concerné (facultatif)")),
+  new SlashCommandBuilder().setName('rc').setDescription('Annonce l’ouverture ou la fermeture des recrutements')
+    .addSubcommand((s) => s.setName('on').setDescription('Recrutements ouverts (RC ON)')
+      .addStringOption((o) => o.setName('details').setDescription('Infos facultatives (conditions, comment postuler…)').setMaxLength(800)))
+    .addSubcommand((s) => s.setName('off').setDescription('Recrutements fermés (RC OFF)')
+      .addStringOption((o) => o.setName('details').setDescription('Infos facultatives (motif, date de réouverture…)').setMaxLength(800))),
+  new SlashCommandBuilder().setName('check').setDescription('Vérifications')
+    .addSubcommand((s) => s.setName('abs').setDescription('Absences en cours et à venir')),
+  new SlashCommandBuilder().setName('ventes').setDescription('Statistiques de ventes')
+    .addSubcommand((s) => s.setName('total').setDescription('Publie le total de ventes de chaque employé')),
 ].map((c) => c.setDefaultMemberPermissions(null).toJSON());
 
+// ---------- Sanctions, avis, service, absences, ventes ----------
+const SANCTION = {
+  'Avertissement': { color: 0xE6A100, icon: '⚠️', terms: "Cet avertissement est inscrit à ton dossier. En cas de récidive, une sanction plus lourde pourra être prise (blâme, convocation, voire licenciement)." },
+  'Blâme': { color: 0xD9541E, icon: '🟧', terms: "Ce blâme est inscrit à ton dossier. Toute nouvelle faute entraînera une convocation et pourra mener à ton licenciement." },
+  'Convocation': { color: 0xB3261E, icon: '📨', terms: "Ta présence à cette convocation est **obligatoire**. **Si tu ne te présentes pas à la convocation, tu seras licencié(e).**" },
+};
+async function cmdSanction(i) {
+  const type = i.options.getString('type'), user = i.options.getUser('membre'), reason = i.options.getString('motif');
+  const date = i.options.getString('date'), lieu = i.options.getString('lieu');
+  if (type === 'Convocation' && !date) return i.editReply('⚠️ Pour une convocation, indique la **date** (et le lieu) dans les options de la commande.');
+  const convoc = type === 'Convocation' ? [date, lieu].filter(Boolean).join(' · ') : '';
+  const by = i.user.displayName, cfg = SANCTION[type];
+  const ch = await i.guild.channels.fetch(SANCTIONS_CHANNEL).catch(() => null);
+  if (!ch) return i.editReply('⚠️ Salon des sanctions introuvable (variable SANCTIONS_CHANNEL_ID).');
+  const res = await site({ action: 'sanction', discord_id: user.id, type, reason, convoc, by });
+  const embed = new EmbedBuilder().setColor(cfg.color).setTitle(`${cfg.icon} ${type}`)
+    .setDescription(`Employé concerné : <@${user.id}>`).addFields({ name: 'Motif', value: reason });
+  if (convoc) embed.addFields({ name: 'Convocation', value: convoc });
+  embed.addFields({ name: 'À savoir', value: cfg.terms }).setFooter({ text: `Prononcé par ${by}` }).setTimestamp();
+  await ch.send({ content: `<@${user.id}>`, embeds: [embed], allowedMentions: { users: [user.id] } });
+  return i.editReply(`✅ ${type} publié(e) dans <#${ch.id}>. ` + (res.ok ? 'Elle apparaît dans sa fiche sur le site.' : `⚠️ Non enregistrée sur sa fiche : ${siteErr(res)}.`));
+}
+async function cmdAvis(i) {
+  const note = i.options.getInteger('note'), msg = i.options.getString('message'), emp = i.options.getUser('employe');
+  const embed = new EmbedBuilder().setColor(0xE6A100).setTitle('⭐ Nouvel avis')
+    .setDescription(`${'⭐'.repeat(note)}${'☆'.repeat(5 - note)}  **${note}/5**\n\n${msg}`)
+    .setFooter({ text: `Avis de ${i.user.displayName}` }).setTimestamp();
+  if (emp) embed.addFields({ name: 'Employé concerné', value: `<@${emp.id}>` });
+  const ch = (AVIS_CHANNEL && await i.guild.channels.fetch(AVIS_CHANNEL).catch(() => null)) || i.channel;
+  await ch.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  return i.editReply('✅ Merci pour ton avis !');
+}
+async function cmdRc(i) {
+  const on = i.options.getSubcommand() === 'on', details = i.options.getString('details');
+  const embed = new EmbedBuilder().setColor(on ? 0x137A4B : 0xB3261E)
+    .setTitle(on ? '🟢 RC ON · Recrutements ouverts' : '🔴 RC OFF · Recrutements fermés')
+    .setDescription(on
+      ? "Les recrutements de **Docktease** sont **ouverts** ! Tu veux rejoindre l'équipe ? Fais ta demande auprès de la direction."
+      : "Les recrutements de **Docktease** sont **fermés** pour le moment. Merci de ne pas envoyer de candidature : la prochaine ouverture sera annoncée ici.")
+    .setFooter({ text: `Annoncé par ${i.user.displayName}` }).setTimestamp();
+  if (details) embed.addFields({ name: 'Informations', value: details });
+  const ch = (RC_CHANNEL && await i.guild.channels.fetch(RC_CHANNEL).catch(() => null)) || i.channel;
+  await ch.send({ content: '@everyone', embeds: [embed], allowedMentions: { parse: ['everyone'] } });
+  return i.editReply(on ? '✅ RC ON publié : recrutements ouverts.' : '✅ RC OFF publié : recrutements fermés.');
+}
+async function cmdCheckAbs(i) {
+  const res = await site({ action: 'absences' });
+  if (!res.ok) return i.editReply(`⚠️ Site : ${siteErr(res)}.`);
+  const fmt = (a) => `• **${a.employe || '—'}**${a.discord_id ? ` (<@${a.discord_id}>)` : ''} · ${a.type} · ${frDate(a.du)} → ${frDate(a.au || a.du)}${a.statut === 'En attente' ? ' · ⏳ en attente' : ''}`;
+  const embed = new EmbedBuilder().setColor(0x2F6FDE).setTitle(`🗓️ Absences · ${frDate(res.today)}`).addFields(
+    { name: `En cours (${res.current.length})`, value: res.current.map(fmt).join('\n').slice(0, 1000) || "Personne n'est absent aujourd'hui." },
+    { name: `À venir (${res.upcoming.length})`, value: res.upcoming.map(fmt).join('\n').slice(0, 1000) || 'Aucune absence prévue.' })
+    .setFooter({ text: 'Données du site · onglet Absences' });
+  return i.editReply({ embeds: [embed] });
+}
+async function cmdVentes(i) {
+  const res = await site({ action: 'ventes_total' });
+  if (!res.ok) return i.editReply(`⚠️ Site : ${siteErr(res)}.`);
+  if (!res.employees.length) return i.editReply('ℹ️ Aucun employé avec un compte sur le site.');
+  const money = (n) => new Intl.NumberFormat('fr-FR').format(n) + ' $';
+  const lines = res.employees.map((x, n) => {
+    const nom = `${x.prenom} ${x.nom}`.trim() || x.name;
+    return `**${n + 1}.** ${nom} (\`${x.discord_id}\`) · [Fiche](${SITE_URL}/fiches#${x.uid}) · **${x.count}** vente(s)` + (x.sold ? ` dont ${x.sold} vendue(s) · ${money(x.total)}` : '');
+  });
+  const chunks = []; let cur = '';
+  for (const l of lines) { if (cur.length + l.length > 3800) { chunks.push(cur); cur = ''; } cur += l + '\n'; }
+  if (cur) chunks.push(cur);
+  const sum = res.employees.reduce((a, x) => a + x.count, 0);
+  const embeds = chunks.map((c, n) => new EmbedBuilder().setColor(0x2F6FDE).setDescription(c)
+    .setTitle(n === 0 ? '📊 Total des ventes par employé' : null)
+    .setFooter(n === chunks.length - 1 ? { text: `${sum} vente(s) au total · hors annulées` } : null));
+  await i.channel.send({ embeds, allowedMentions: { parse: [] } });
+  return i.editReply('✅ Classement des ventes publié.');
+}
+
 async function onCommand(i) {
-  if (!isStaff(i)) return i.reply({ content: '⛔ Réservé à la direction.', flags: EPH });
+  if (i.commandName !== 'avis' && !isStaff(i)) return i.reply({ content: '⛔ Réservé à la direction.', flags: EPH });
   await i.deferReply({ flags: EPH });
   const g = i.guild;
+  if (i.commandName === 'sanction') return cmdSanction(i);
+  if (i.commandName === 'avis') return cmdAvis(i);
+  if (i.commandName === 'rc') return cmdRc(i);
+  if (i.commandName === 'check') return cmdCheckAbs(i);
+  if (i.commandName === 'ventes') return cmdVentes(i);
 
   if (i.commandName === 'virer') {
     const u = i.options.getUser('membre');
@@ -266,6 +370,18 @@ client.on('guildMemberUpdate', async (oldM, newM) => {
   catch (err) { await alertStaff(`⚠️ Casier non créé pour <@${newM.id}> (${err.message}). Utilisez /casier creer.`); }
 });
 
+client.on('guildMemberAdd', async (m) => {
+  if (m.guild.id !== GUILD_ID || m.user.bot) return;
+  const ch = WELCOME_CHANNEL ? await m.guild.channels.fetch(WELCOME_CHANNEL).catch(() => null)
+    : m.guild.channels.cache.find((c) => c.type === ChannelType.GuildText && /bienvenue/i.test(c.name.normalize('NFKD')));
+  if (!ch) return;
+  const embed = new EmbedBuilder().setColor(0x2F6FDE).setTitle('👋 Bienvenue sur Docktease !')
+    .setDescription(`Bienvenue <@${m.id}>, tu es notre **${m.guild.memberCount}e** membre !\n\n` +
+      `Prends le temps de lire le règlement. Si tu rejoins l'équipe, ton casier personnel sera créé automatiquement dès que tu recevras le rôle employé, puis tu pourras remplir ta fiche sur le site.`)
+    .setThumbnail(m.user.displayAvatarURL()).setTimestamp();
+  await ch.send({ content: `<@${m.id}>`, embeds: [embed], allowedMentions: { users: [m.id] } }).catch((err) => console.error('Bienvenue :', err.message));
+});
+
 client.on('interactionCreate', async (i) => {
   try {
     if (i.isChatInputCommand()) await onCommand(i);
@@ -308,7 +424,8 @@ http.createServer(async (req, res) => {
   } catch (err) { console.error(err); await alertStaff(`⚠️ Fiche non postée : ${err.message}`); out(500, { ok: false }); }
 }).listen(PORT, () => console.log('Serveur HTTP du bot sur le port ' + PORT));
 
-console.log(`Token reçu : ${TOKEN.length} caractères, ${TOKEN.split('.').length} parties (un vrai token : environ 70 caractères, 3 parties)`);
+const tokenBotId = (() => { try { return Buffer.from(TOKEN.split('.')[0], 'base64').toString(); } catch { return '?'; } })();
+console.log(`Token reçu : ${TOKEN.length} caractères, ${TOKEN.split('.').length} parties · il appartient au bot ID ${tokenBotId} (doit être égal à l'Application ID du portail Discord)`);
 client.login(TOKEN).catch((err) => {
   console.error(`Connexion refusée par Discord : ${err.message}`);
   console.error("→ Portail Discord › onglet Bot (pas OAuth2) › Reset Token › Copy, puis recolle-le dans DISCORD_TOKEN sur Railway.");
