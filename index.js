@@ -398,7 +398,13 @@ client.on('interactionCreate', async (i) => {
 client.once('clientReady', async () => {
   const g = guild();
   if (!g) { console.error('Le bot n’est pas dans ce serveur (GUILD_ID incorrect ?)'); process.exit(1); }
-  await g.commands.set(commands);
+  try {
+    const set = await g.commands.set(commands);
+    console.log('Commandes enregistrées : ' + [...set.values()].map((c) => '/' + c.name).join(' '));
+  } catch (err) {
+    console.error('⚠️ Commandes NON enregistrées : ' + err.message, JSON.stringify(err.rawError?.errors ?? {}).slice(0, 800));
+    await alertStaff('⚠️ Les commandes du bot n\'ont pas pu être enregistrées : ' + err.message);
+  }
   const members = await g.members.fetch();
   let made = 0;   // rattrape les rôles donnés pendant que le bot était éteint
   for (const m of members.values()) {
